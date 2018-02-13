@@ -22,7 +22,9 @@
 
 #include <err.h>
 #include <pwd.h>
+#ifndef OPSSL
 #include <tls.h>
+#endif
 #include <unistd.h>
 
 #include "extern.h"

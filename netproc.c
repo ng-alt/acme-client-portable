@@ -84,7 +84,7 @@ buf_dump(const struct buf *buf)
 		} else
 			nbuf[j++] = isprint((int)buf->buf[i]) ?
 				buf->buf[i] : '?';
-	dodbg("transfer buffer: [%.*s] (%zu bytes)", j, nbuf, buf->sz);
+	warnx("transfer buffer: [%.*s] (%zu bytes)", j, nbuf, buf->sz);
 	free(nbuf);
 }
 
@@ -339,15 +339,32 @@ donewreg(struct conn *c, const char *agreement,
 	int		 rc = 0;
 	char		*req;
 	long		 lc;
+	char	agreement_buf[128];
+	int		new_agreement = 0;
+	char	*cp = NULL;
 
 	dodbg("%s: new-reg", p->newreg);
-
-	if (NULL == (req = json_fmt_newreg(agreement)))
+	strlcpy(agreement_buf, agreement, sizeof(agreement_buf));
+reg:
+	if (NULL == (req = json_fmt_newreg(agreement_buf)))
 		warnx("json_fmt_newreg");
 	else if ((lc = sreq(c, p->newreg, req)) < 0)
 		warnx("%s: bad comm", p->newreg);
-	else if (200 != lc && 201 != lc)
+	else if (200 != lc && 201 != lc && 409 != lc)	//409, Registration key is already in use
+	{
 		warnx("%s: bad HTTP: %ld", p->newreg, lc);
+		if(lc == 400 && (cp = strstr(c->buf.buf, "current agreement URL")) && new_agreement == 0)
+		{
+			//parse new agreement url
+			cp = strchr(cp, '[');
+			strlcpy(agreement_buf, cp+1, sizeof(agreement_buf));
+			cp = strchr(agreement_buf, ']');
+			*cp = '\0';
+			new_agreement = 1;
+			warnx("try new agreement: %s", agreement_buf);
+			goto reg;
+		}
+	}
 	else if (NULL == c->buf.buf || 0 == c->buf.sz)
 		warnx("%s: empty response", p->newreg);
 	else
@@ -692,8 +709,9 @@ netproc(int kfd, int afd, int Cfd, int cfd, int dfd, int rfd,
 	}
 
 	/* If new, register with the CA server. */
+	// do reg, if alreay registered, continue to do authorise
 
-	if (newacct && ! donewreg(&c, agreement, &paths))
+	if ( ! donewreg(&c, agreement, &paths) && newacct)
 		goto out;
 
 	/* Pre-authorise all domains with CA server. */

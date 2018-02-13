@@ -38,15 +38,59 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef OPSSL
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+#else
 #include <tls.h>
+#endif
 #include <unistd.h>
 
 #include "http.h"
 #include "extern.h"
 
+#define DEFAULT_CA_FILE "/etc/ssl/certs/letsencrypt.pem"
+#define DEFAULT_CA_FILE2 "/jffs/RootCA/letsencrypt.pem"
+#define DEFAULT_CA_FILE3 "/tmp/RootCA/letsencrypt.pem"
+
 #ifndef DEFAULT_CA_FILE
 # define DEFAULT_CA_FILE "/etc/ssl/cert.pem"
 #endif
+
+const char *allowedCiphers =
+	"ECDHE-RSA-AES128-GCM-SHA256:"
+	"ECDHE-ECDSA-AES128-GCM-SHA256:"
+	"ECDHE-RSA-AES256-GCM-SHA384:"
+	"ECDHE-ECDSA-AES256-GCM-SHA384:"
+	"DHE-RSA-AES128-GCM-SHA256:"
+	"DHE-DSS-AES128-GCM-SHA256:"
+	"ECDHE-RSA-AES128-SHA256:"
+	"ECDHE-ECDSA-AES128-SHA256:"
+	"ECDHE-RSA-AES128-SHA:"
+	"ECDHE-ECDSA-AES128-SHA:"
+	"ECDHE-RSA-AES256-SHA384:"
+	"ECDHE-ECDSA-AES256-SHA384:"
+	"ECDHE-RSA-AES256-SHA:"
+	"ECDHE-ECDSA-AES256-SHA:"
+	"DHE-RSA-AES128-SHA256:"
+	"DHE-RSA-AES128-SHA:"
+	"DHE-DSS-AES128-SHA256:"
+	"DHE-RSA-AES256-SHA256:"
+	"DHE-DSS-AES256-SHA:"
+	"DHE-RSA-AES256-SHA:"
+	"AES128-GCM-SHA256:"
+	"AES256-GCM-SHA384:"
+	"AES128-SHA256:"
+	"AES256-SHA256:"
+	"AES128-SHA:"
+	"AES256-SHA:AES:"
+	"CAMELLIA:DES-CBC3-SHA:"
+	"!aNULL:!eNULL:!EXPORT:!DES:!RC4:!MD5:!PSK:!aECDH:"
+	"!EDH-DSS-DES-CBC3-SHA:"
+	"!EDH-RSA-DES-CBC3-SHA:"
+	"!KRB5-DES-CBC3-SHA:"
+	"!SRP-RSA-3DES-EDE-CBC-SHA"
+	;
 
 /*
  * A buffer for transferring HTTP/S data.
@@ -72,13 +116,21 @@ struct	http {
 	struct source	   src;    /* endpoint (raw) host */
 	char		  *path;   /* path to request */
 	char		  *host;   /* name of endpoint host */
+#ifdef OPSSL
+	SSL			  *ssl;    /* if TLS */
+#else
 	struct tls	  *ctx;    /* if TLS */
+#endif
 	writefp		   writer; /* write function */
 	readfp		   reader; /* read function */
 };
 
 struct	httpcfg {
+#ifdef OPSSL
+	SSL_CTX		  *sslctx;
+#else
 	struct tls_config *tlscfg;
+#endif
 };
 
 static ssize_t
@@ -102,6 +154,72 @@ dosyswrite(const void *buf, size_t sz, const struct http *http)
 		warn("%s: write", http->src.ip);
 	return(rc);
 }
+
+#ifdef OPSSL
+static ssize_t
+dotlsread(char *buf, size_t sz, const struct http *http)
+{
+	int total = 0;
+	int n, err;
+
+	do {
+		n = SSL_read(http->ssl, buf + total, sz - total);
+
+		err = SSL_get_error(http->ssl, n);
+		switch (err) {
+		case SSL_ERROR_NONE:
+			total += n;
+			break;
+		case SSL_ERROR_ZERO_RETURN:
+			total += n;
+			goto OUT;
+		case SSL_ERROR_WANT_WRITE:
+		case SSL_ERROR_WANT_READ:
+			break;
+		default:
+			warn("SSL_read return %d", err);
+			ERR_print_errors_fp(stderr);
+			if (total == 0) total = -1;
+			goto OUT;
+		}
+	} while ((sz - total > 0) && SSL_pending(http->ssl));
+
+OUT:
+	return (total);
+}
+
+static ssize_t
+dotlswrite(const void *buf, size_t sz, const struct http *http)
+{
+	int total = 0;
+	int n, err;
+
+	while (sz - total > 0) {
+		n = SSL_write(http->ssl, buf + total, sz - total);
+
+		err = SSL_get_error(http->ssl, n);
+		switch (err) {
+		case SSL_ERROR_NONE:
+			total += n;
+			break;
+		case SSL_ERROR_ZERO_RETURN:
+			total += n;
+			goto OUT;
+		case SSL_ERROR_WANT_WRITE:
+		case SSL_ERROR_WANT_READ:
+			break;
+		default:
+			warn("SSL_write return %d", err);
+			ERR_print_errors_fp(stderr);
+			if (total == 0) total = -1;
+			goto OUT;
+		}
+	}
+
+OUT:
+	return (total);
+}
+#else
 
 #if defined(TLS_READ_AGAIN) && defined(TLS_WRITE_AGAIN)
 /*
@@ -198,9 +316,22 @@ dotlswrite(const void *buf, size_t sz, const struct http *http)
 }
 #endif
 
+#endif	//OPSSL
+
 /*
  * Free the resources of an http_init() object.
  */
+#ifdef OPSSL
+void
+http_uninit(struct httpcfg *p)
+{
+	if (NULL == p)
+		return;
+	if (NULL != p->sslctx)
+		SSL_CTX_free(p->sslctx);
+	free(p);
+}
+#else
 void
 http_uninit(struct httpcfg *p)
 {
@@ -211,7 +342,9 @@ http_uninit(struct httpcfg *p)
 		tls_config_free(p->tlscfg);
 	free(p);
 }
+#endif
 
+#ifndef OPSSL
 /*
  * Work around the "lazy-loading" problem in earlier versions of libtls.
  * In these systems, using tls_config_set_ca_file() would only cause the
@@ -250,6 +383,7 @@ http_config_set_ca_file(struct httpcfg *p)
 	return(rc);
 }
 #endif
+#endif
 
 /*
  * This function allocates a configuration shared among multiple
@@ -259,6 +393,61 @@ http_config_set_ca_file(struct httpcfg *p)
  * Returns the configuration object or NULL on errors.
  * A returned object must be freed with http_deinit().
  */
+#ifdef OPSSL
+struct httpcfg *
+http_init(void)
+{
+	struct httpcfg	*p;
+	struct stat st;
+	int rc;
+
+	SSL_load_error_strings();
+	SSLeay_add_ssl_algorithms();
+
+	if (NULL == (p = malloc(sizeof(struct httpcfg)))) {
+		warn("malloc");
+		return (NULL);
+	} else if (NULL == (p->sslctx = SSL_CTX_new(SSLv23_client_method()))) {
+		warn("SSL_CTX_new");
+		ERR_print_errors_fp(stderr);
+		goto err;
+	}
+
+	// Setup EC support
+#ifdef NID_X9_62_prime256v1
+	EC_KEY *ecdh = NULL;
+	if (NULL != (ecdh = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1))) {
+		SSL_CTX_set_tmp_ecdh(p->sslctx, ecdh);
+		EC_KEY_free(ecdh);
+	}
+#endif
+
+	// Setup available ciphers
+	if (1 != SSL_CTX_set_cipher_list(p->sslctx, allowedCiphers)) {
+		warn("SSL_CTX_set_cipher_list");
+		goto err;
+	}
+
+	// Setup CA to verify server
+	SSL_CTX_set_verify(p->sslctx, SSL_VERIFY_PEER, NULL);
+	if( (stat(DEFAULT_CA_FILE2, &st) == 0) && (st.st_size > 0) )
+		rc = SSL_CTX_load_verify_locations(p->sslctx, DEFAULT_CA_FILE2, NULL);
+	else if( (stat(DEFAULT_CA_FILE3, &st) == 0) && (st.st_size > 0) )
+		rc = SSL_CTX_load_verify_locations(p->sslctx, DEFAULT_CA_FILE3, NULL);
+	else
+		rc = SSL_CTX_load_verify_locations(p->sslctx, DEFAULT_CA_FILE, NULL);
+	if (1 != rc) {
+		warn("SSL_CTX_load_verify_locations");
+		ERR_print_errors_fp(stderr);
+		goto err;
+	}
+
+	return (p);
+ err:
+	http_uninit(p);
+	return (NULL);
+}
+#else
 struct httpcfg *
 http_init(void)
 {
@@ -307,6 +496,7 @@ http_init(void)
 	http_uninit(p);
 	return (NULL);
 }
+#endif
 
 static ssize_t
 http_read(char *buf, size_t sz, const struct http *http)
@@ -350,6 +540,25 @@ http_write(const char *buf, size_t sz, const struct http *http)
  * Also account for the TLS_READ_AGAIN invocation versus the new
  * TLS_WANT_POLLIN.
  */
+#ifdef OPSSL
+void
+http_disconnect(struct http *http)
+{
+	if (NULL != http->ssl) {
+		SSL_shutdown(http->ssl);
+		SSL_free(http->ssl);
+		if (-1 == close(http->fd))
+			warn("%s: close", http->src.ip);
+	} else if (-1 != http->fd) {
+		/* Non-TLS connection. */
+		if (-1 == close(http->fd))
+			warn("%s: close", http->src.ip);
+	}
+
+	http->fd = -1;
+	http->ssl = NULL;
+}
+#else
 void
 http_disconnect(struct http *http)
 {
@@ -385,6 +594,7 @@ http_disconnect(struct http *http)
 	http->fd = -1;
 	http->ctx = NULL;
 }
+#endif
 
 void
 http_free(struct http *http)
@@ -409,6 +619,7 @@ http_alloc(struct httpcfg *cfg,
 	socklen_t	 len;
 	size_t		 cur, i = 0;
 	struct http	*http;
+	int			rc;
 
 	/* Do this while we still have addresses to connect. */
 again:
@@ -491,6 +702,30 @@ again:
 	http->writer = dotlswrite;
 	http->reader = dotlsread;
 
+#ifdef OPSSL
+	// Create new SSL object
+	if (NULL == (http->ssl = SSL_new(cfg->sslctx))) {
+		warn("SSL_new");
+		goto err;
+	}
+
+	SSL_set_mode(http->ssl, SSL_MODE_AUTO_RETRY);
+
+	SSL_CTX_set_options(cfg->sslctx,
+		SSL_OP_NO_SSLv2 |
+		SSL_OP_NO_SSLv3 |
+		SSL_OP_CIPHER_SERVER_PREFERENCE);
+
+	if (0 == SSL_set_fd(http->ssl, http->fd)) {
+		warn("SSL_set_fd");
+		goto err;
+	}
+	else if (0 > (rc = SSL_connect(http->ssl))) {
+		warn("SSL_connect error: %d", SSL_get_error(http->ssl, rc));
+		ERR_print_errors_fp(stderr);
+		goto err;
+	}
+#else
 	if (NULL == (http->ctx = tls_client())) {
 		warn("tls_client");
 		goto err;
@@ -507,6 +742,7 @@ again:
 			tls_error(http->ctx));
 		goto err;
 	}
+#endif
 
 	return (http);
 err:

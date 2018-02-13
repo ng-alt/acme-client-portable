@@ -17,7 +17,7 @@
  */
 #ifdef __linux__
 # define _GNU_SOURCE
-# ifndef MUSL_LIBC
+# if !defined(MUSL_LIBC) && !defined(OPSSL)
 #  include <bsd/stdlib.h>
 #  include <bsd/string.h>
 # else

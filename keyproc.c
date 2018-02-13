@@ -130,7 +130,16 @@ keyproc(int netsock, int ocsp, const char *keyfile,
 	 */
 
 	while (0 == RAND_status()) {
+#ifdef __linux__
+		FILE *fp;
+		if( NULL != (fp = fopen("/dev/urandom", "r")) )
+		{
+			fread(rbuf, 1, sizeof(rbuf), fp);
+			fclose(fp);
+		}
+#else
 		arc4random_buf(rbuf, sizeof(rbuf));
+#endif
 		RAND_seed(rbuf, sizeof(rbuf));
 	}
 

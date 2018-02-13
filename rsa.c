@@ -31,7 +31,7 @@
 /*
  * Default number of bits when creating a new key.
  */
-#define	KBITS 4096
+#define	KBITS 2048//4096
 
 /*
  * Create an RSA key with the default KBITS number of bits.

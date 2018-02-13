@@ -85,8 +85,7 @@ host_dns(const char *s, struct addr *vec)
 	for (vecsz = 0, res = res0;
 	     NULL != res && vecsz < MAX_SERVERS_DNS;
 	     res = res->ai_next) {
-		if (res->ai_family != AF_INET &&
-		    res->ai_family != AF_INET6)
+		if (res->ai_family != AF_INET)
 			continue;
 
 		sa = res->ai_addr;

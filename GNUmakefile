@@ -1,9 +1,13 @@
 # If you end up changing anything significant in this makefile that's
 # not overly system-specific, please submit a bug report.
 
-PREFIX	?= /usr/local
+PREFIX	?= /usr
 MAN1DIR	?= $(PREFIX)/man/man1
 BINDIR	?= $(PREFIX)/bin
+
+CFLAGS += $(if $(STAGING_DIR),--sysroot=$(STAGING_DIR))
+LDFLAGS += $(if $(STAGING_DIR),--sysroot=$(STAGING_DIR))
+
 CFLAGS	+= -g -W -Wall -DHAVE_CONFIG_H
 OBJS 	 = acctproc.o \
 	   base64.o \
@@ -26,7 +30,33 @@ OBJS 	 = acctproc.o \
 # configuration for us and generate config.h.
 # However, for now this works fine.
 
-ifeq ($(shell uname), Linux)
+USE_OPENSSL=y
+ifeq ($(USE_OPENSSL), y)
+
+CFLAGS	+= -DOPSSL
+CFLAGS	+= -I$(TOP)/openssl/include
+LDFLAGS += -L$(TOP)/openssl
+
+OBJS	+= util-portable.o
+OBJS	+= sandbox-null.o
+OBJS	+= strlcat.o
+OBJS	+= strlcpy.o
+
+else ifeq ($(USE_OPENSSL), n)
+
+CFLAGS	+= -I$(TOP)/libbsd/include
+LDFLAGS += -L$(TOP)/libbsd/src/.libs -lbsd
+
+CFLAGS	+= -I$(TOP)/libressl/include
+LDFLAGS += -L$(TOP)/libressl/crypto/.libs
+LDFLAGS += -L$(TOP)/libressl/ssl/.libs
+LDFLAGS += -L$(TOP)/libressl/tls/.libs -ltls
+
+LDFLAGS += -lpthread
+OBJS	+= util-portable.o
+OBJS	+= sandbox-null.o
+
+else ifeq ($(shell uname), Linux)
 
 # Compiling on Linux.
 # Linux is the biggest "moving target" because there are lots of
@@ -124,7 +154,7 @@ endif
 all: acme-client
 
 acme-client: $(OBJS)
-	$(CC) -o $@ $(OBJS) $(LDFLAGS) -ltls -lssl -lcrypto $(LIBADD)
+	$(CC) -o $@ $(OBJS) $(LDFLAGS) -lssl -lcrypto $(LIBADD)
 
 # This is for synchronising from -portable to the master.
 rmerge:
